@@ -25,15 +25,19 @@ else:
     device = 'cpu'
 device = 'cpu'
 
-# Set a consistent dtype for the entire model
-dtype = torch.float32  # Using float32 for better compatibility
+# Set a consistent dtype for the entire model - use float32 for compatibility
+dtype = torch.float32
 
 chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
 
+# Load model with consistent dtype
 gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
-    model_path, trust_remote_code=True,
-    torch_dtype=dtype,  # Ensure consistent dtype during loading
+    model_path, 
+    trust_remote_code=True,
+    torch_dtype=dtype,
 )
+
+# Convert entire model to the same dtype
 gpt = gpt.to(dtype).to(device).eval()
 
 
