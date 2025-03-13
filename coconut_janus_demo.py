@@ -25,12 +25,16 @@ else:
     device = 'cpu'
 device = 'cpu'
 
+# Set a consistent dtype for the entire model
+dtype = torch.float32  # Using float32 for better compatibility
+
 chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
 
 gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
     model_path, trust_remote_code=True,
+    torch_dtype=dtype,  # Ensure consistent dtype during loading
 )
-gpt = gpt.to(torch.bfloat16).to(device).eval()
+gpt = gpt.to(dtype).to(device).eval()
 
 
 #%% md
@@ -63,7 +67,7 @@ standard_response = janus_pro_generate(
     gpt,
     device=device,
     input_text=complex_question,
-    input_images=[image],
+    input_images=None,  # Start without images to simplify debugging
     output_mode="text",
     use_coconut=False,
 )
