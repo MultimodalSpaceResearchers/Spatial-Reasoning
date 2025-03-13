@@ -429,16 +429,31 @@ def generate_text_with_coconut(
     BOT_TOKEN = "<thought>"  # Beginning of thought
     EOT_TOKEN = "</thought>"  # End of thought
     
-    # Add special tokens if they don't exist
-    special_tokens = {"additional_special_tokens": [BOT_TOKEN, EOT_TOKEN]}
-    if BOT_TOKEN not in vl_tokenizer.get_vocab() or EOT_TOKEN not in vl_tokenizer.get_vocab():
-        vl_tokenizer.add_special_tokens(special_tokens)
-        # Resize token embeddings to accommodate new special tokens
-        vl_gpt.resize_token_embeddings(len(vl_tokenizer))
+    # For Janus model, we can't resize token embeddings as it doesn't implement get_input_embeddings
+    # Instead, we'll use existing tokens from the vocabulary
+    # Check if special tokens exist in vocabulary
+    if BOT_TOKEN not in vl_tokenizer.get_vocab():
+        print(f"Warning: {BOT_TOKEN} not in vocabulary. Using <bot> instead.")
+        BOT_TOKEN = "<bot>"
+    if EOT_TOKEN not in vl_tokenizer.get_vocab():
+        print(f"Warning: {EOT_TOKEN} not in vocabulary. Using <eot> instead.")
+        EOT_TOKEN = "<eot>"
     
     # Get token IDs for special tokens
-    bot_token_id = vl_tokenizer.convert_tokens_to_ids(BOT_TOKEN)
-    eot_token_id = vl_tokenizer.convert_tokens_to_ids(EOT_TOKEN)
+    try:
+        bot_token_id = vl_tokenizer.convert_tokens_to_ids(BOT_TOKEN)
+        eot_token_id = vl_tokenizer.convert_tokens_to_ids(EOT_TOKEN)
+        if bot_token_id == vl_tokenizer.unk_token_id:
+            print(f"Warning: {BOT_TOKEN} converted to unknown token ID. Using a standard token instead.")
+            bot_token_id = vl_tokenizer.convert_tokens_to_ids("<s>")  # Use beginning of sentence token
+        if eot_token_id == vl_tokenizer.unk_token_id:
+            print(f"Warning: {EOT_TOKEN} converted to unknown token ID. Using a standard token instead.")
+            eot_token_id = vl_tokenizer.convert_tokens_to_ids("</s>")  # Use end of sentence token
+    except:
+        # Fallback to standard tokens if conversion fails
+        print("Warning: Using standard tokens for BOT and EOT")
+        bot_token_id = vl_tokenizer.bos_token_id
+        eot_token_id = vl_tokenizer.eos_token_id
     
     # Prepare the input
     if input_images is not None:
@@ -479,7 +494,12 @@ def generate_text_with_coconut(
     
     # Get input embeddings
     if hasattr(prep, 'input_ids'):
-        inputs_embeds = vl_gpt.get_input_embeddings()(prep.input_ids)
+        # For Janus model, we need to use the language model's embedding layer
+        try:
+            inputs_embeds = vl_gpt.language_model.get_input_embeddings()(prep.input_ids)
+        except (AttributeError, NotImplementedError):
+            # Fallback if get_input_embeddings is not implemented
+            inputs_embeds = vl_gpt.prepare_inputs_embeds(**prep)
     else:
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**prep)
     
@@ -528,7 +548,15 @@ def generate_text_with_coconut(
     
     # Add EOT token embedding to signal end of continuous thoughts
     eot_token_tensor = torch.tensor([[eot_token_id]], device=device)
-    eot_embedding = vl_gpt.get_input_embeddings()(eot_token_tensor)
+    try:
+        eot_embedding = vl_gpt.language_model.get_input_embeddings()(eot_token_tensor)
+    except (AttributeError, NotImplementedError):
+        # If get_input_embeddings is not available, use a different approach
+        # Create a dummy input with the EOT token and extract its embedding
+        dummy_input = torch.full((1, 1), eot_token_id, dtype=torch.long, device=device)
+        with torch.no_grad():
+            dummy_output = vl_gpt.language_model.model.embed_tokens(dummy_input)
+            eot_embedding = dummy_output
     
     # Update attention mask for EOT token
     final_attention_mask = torch.cat([
