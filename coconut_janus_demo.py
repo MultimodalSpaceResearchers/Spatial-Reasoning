@@ -66,8 +66,8 @@ standard_response = janus_pro_generate(
     chat_processor,
     gpt,
     device=device,
+    input_images=[image],
     input_text=complex_question,
-    input_images=None,  # Start without images to simplify debugging
     output_mode="text",
     use_coconut=False,
 )
