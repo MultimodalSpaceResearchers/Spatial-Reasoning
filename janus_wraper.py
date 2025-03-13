@@ -109,7 +109,7 @@ def generate_text_output(
     vl_gpt,
     vl_tokenizer,
     input_text: str,
-    input_image,
+    input_images,
     device: str,
     seed: int,
     top_p: float,
@@ -126,19 +126,20 @@ def generate_text_output(
     if seed is not None: set_seed(seed)
 
     # If an image is provided, we do multimodal text generation
-    if input_image is not None:
+    if input_images is not None:
         conversation = [
             {
                 "role": "<|User|>",
                 "content": f"<image_placeholder>\n{input_text}",
-                "images": [input_image],
+                "images": input_images,
             },
             {"role": "<|Assistant|>", "content": ""},
         ]
         # Convert numpy array to PIL if needed
-        pil_images = [Image.fromarray(input_image)] if isinstance(input_image, np.ndarray) else [input_image]
+        # pil_images = [Image.fromarray(input_images)] if isinstance(input_images, np.ndarray) else input_images
+        pil_images = [Image.fromarray(input_image) if isinstance(input_image, np.ndarray) else input_image for input_image in input_images]
         prep = vl_chat_processor(conversations=conversation, images=pil_images, force_batchify=True)
-        t_dtype = torch.bfloat16 if torch.cuda.is_available() or torch.mps.is_available() else torch.float16
+        t_dtype = torch.bfloat16 if device=='cuda' or device=='mps' else torch.float16
         prep = prep.to(device, dtype=t_dtype)
 
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**prep)
@@ -156,10 +157,37 @@ def generate_text_output(
         )
         return vl_tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
     else:
+        # conversation = [
+        #     {
+        #         "role": "<|User|>",
+        #         "content": f"<image_placeholder>\n{input_text}",
+        #         'images': [],
+        #     },
+        #     {"role": "<|Assistant|>", "content": ""},
+        # ]
+        # Convert numpy array to PIL if needed
+        # prep = vl_chat_processor(conversations=conversation, force_batchify=True)
+        # t_dtype = torch.bfloat16 if device=='cuda' or device=='mps' else torch.float16
+        # prep = prep.to(device, dtype=t_dtype)
+        #
+        # inputs_embeds = vl_gpt.prepare_inputs_embeds(**prep)
         # Pure text generation
-        inputs = vl_tokenizer.encode(input_text, return_tensors="pt").to(device)
-        outputs = vl_gpt.generate(
-            inputs,
+        # inputs = vl_tokenizer.encode(input_text, return_tensors="pt").to(device)
+        conversation = [
+            {
+                "role": "<|User|>",
+                "content": f"{input_text}",
+                "images": [],
+            },
+            {"role": "<|Assistant|>", "content": ""},
+        ]
+        prep = vl_chat_processor(conversations=conversation, force_batchify=True).to(device)
+        t_dtype = torch.bfloat16 if device=='cuda' or device=='mps' else torch.float16
+        inputs_embeds = vl_gpt.prepare_inputs_embeds(prep)
+        # inputs = vl_tokenizer.encode(input_text, return_tensors="pt").to(device)
+        outputs = vl_gpt.language_model.generate(
+            # inputs_embeds=inputs_embeds,
+            # inputs=inputs,
             max_new_tokens=512,
             do_sample=True,
             temperature=temperature,
@@ -173,7 +201,7 @@ def generate_image_output(
     vl_gpt,
     vl_tokenizer,
     input_text: str,
-    input_image,
+    input_images,
     device: str,
     seed: int,
     guidance: float,
@@ -198,16 +226,16 @@ def generate_image_output(
 
     with torch.inference_mode():
         # Build the prompt
-        if input_image is not None:
+        if input_images is not None:
             conversation = [
                 {
                     "role": "<|User|>",
                     "content": f"<image_placeholder>\n{input_text}",
-                    "images": [input_image],
+                    "images": input_images,
                 },
                 {"role": "<|Assistant|>", "content": ""},
             ]
-            prep = vl_chat_processor(conversations=conversation, images=[input_image], force_batchify=True)
+            prep = vl_chat_processor(conversations=conversation, images=input_images, force_batchify=True)
             prompt = prep.sft_format[0] + vl_chat_processor.image_start_tag
         else:
             messages = [
@@ -282,7 +310,7 @@ def janus_pro_generate(
     vl_chat_processor,
     vl_gpt,
     input_text=None,
-    input_image=None,
+    input_images=None,
     device='cuda',
     output_mode="text",
     seed=None,
@@ -316,7 +344,7 @@ def janus_pro_generate(
             vl_gpt,
             vl_chat_processor.tokenizer,
             input_text=input_text,
-            input_image=input_image,
+            input_images=input_images,
             device=device,
             seed=seed,
             top_p=top_p,
@@ -329,7 +357,7 @@ def janus_pro_generate(
             vl_gpt,
             vl_chat_processor.tokenizer,
             input_text=input_text,
-            input_image=input_image,
+            input_images=input_images,
             device=device,
             seed=seed,
             top_p=top_p,
@@ -341,7 +369,7 @@ def janus_pro_generate(
             vl_gpt,
             vl_chat_processor.tokenizer,
             input_text=input_text,
-            input_image=input_image,
+            input_images=input_images,
             device=device,
             seed=seed,
             guidance=guidance,
@@ -362,7 +390,7 @@ def generate_text_with_coconut(
     vl_gpt,
     vl_tokenizer,
     input_text: str,
-    input_image,
+    input_images,
     device: str,
     seed: int,
     top_p: float,
@@ -398,8 +426,8 @@ def generate_text_with_coconut(
     if seed is not None: set_seed(seed)
     
     # Special tokens for continuous thought
-    BOT_TOKEN = "<bot>"  # Beginning of thought
-    EOT_TOKEN = "<eot>"  # End of thought
+    BOT_TOKEN = "<thought>"  # Beginning of thought
+    EOT_TOKEN = "</thought>"  # End of thought
     
     # Add special tokens if they don't exist
     special_tokens = {"additional_special_tokens": [BOT_TOKEN, EOT_TOKEN]}
@@ -413,17 +441,17 @@ def generate_text_with_coconut(
     eot_token_id = vl_tokenizer.convert_tokens_to_ids(EOT_TOKEN)
     
     # Prepare the input
-    if input_image is not None:
+    if input_images is not None:
         conversation = [
             {
                 "role": "<|User|>",
                 "content": f"<image_placeholder>\n{input_text}",
-                "images": [input_image],
+                "images": input_images,
             },
             {"role": "<|Assistant|>", "content": f"{BOT_TOKEN}"},
         ]
         # Convert numpy array to PIL if needed
-        pil_images = [Image.fromarray(input_image)] if isinstance(input_image, np.ndarray) else [input_image]
+        pil_images = [Image.fromarray(input_image) if isinstance(input_image, np.ndarray) else input_image for input_image in input_images ]
         prep = vl_chat_processor(conversations=conversation, images=pil_images, force_batchify=True)
     else:
         # Text-only input
@@ -446,7 +474,7 @@ def generate_text_with_coconut(
         })
     
     # Set data type based on device
-    t_dtype = torch.bfloat16 if torch.cuda.is_available() or torch.mps.is_available() else torch.float16
+    t_dtype = torch.bfloat16 if device=='cuda' or device=='mps' else torch.float16
     prep = prep.to(device, dtype=t_dtype)
     
     # Get input embeddings
