@@ -426,19 +426,13 @@ def generate_text_with_coconut(
     if seed is not None: set_seed(seed)
     
     # Special tokens for continuous thought
-    BOT_TOKEN = "<thought>"  # Beginning of thought
-    EOT_TOKEN = "</thought>"  # End of thought
+    BOT_TOKEN = "<|det|>"  # Beginning of thought
+    EOT_TOKEN = "<|/det|>"  # End of thought
     
     # For Janus model, we can't resize token embeddings as it doesn't implement get_input_embeddings
     # Instead, we'll use existing tokens from the vocabulary
     # Check if special tokens exist in vocabulary
-    if BOT_TOKEN not in vl_tokenizer.get_vocab():
-        print(f"Warning: {BOT_TOKEN} not in vocabulary. Using <bot> instead.")
-        BOT_TOKEN = "<bot>"
-    if EOT_TOKEN not in vl_tokenizer.get_vocab():
-        print(f"Warning: {EOT_TOKEN} not in vocabulary. Using <eot> instead.")
-        EOT_TOKEN = "<eot>"
-    
+
     # Get token IDs for special tokens
     try:
         bot_token_id = vl_tokenizer.convert_tokens_to_ids(BOT_TOKEN)
