@@ -25,10 +25,27 @@ class EmbeddingInfluencedLM(nn.Module):
         
         # Load the base model and tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_path)
-        self.base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_path, 
-            trust_remote_code=True
-        ).to(device)
+        
+        try:
+            # Try loading with AutoModelForCausalLM
+            self.base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_path, 
+                trust_remote_code=True
+            ).to(device)
+        except Exception as e:
+            print(f"Error loading with AutoModelForCausalLM: {e}")
+            print("Trying to load with MultiModalityCausalLM...")
+            
+            # Try loading with MultiModalityCausalLM if available
+            try:
+                from Janus.janus.models import MultiModalityCausalLM
+                self.base_model = MultiModalityCausalLM.from_pretrained(
+                    base_model_path,
+                    trust_remote_code=True
+                ).to(device)
+            except Exception as e2:
+                print(f"Error loading with MultiModalityCausalLM: {e2}")
+                raise RuntimeError(f"Could not load model: {e}, {e2}")
         
         # Extract embedding dimension from the base model
         try:
@@ -80,14 +97,33 @@ class EmbeddingInfluencedLM(nn.Module):
         Returns:
             Dictionary containing model outputs
         """
-        # Get the base model's output
-        base_outputs = self.base_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            output_hidden_states=True,
-            return_dict=True
-        )
+        # Create inputs dictionary for the base model
+        model_inputs = {
+            "return_dict": True,
+            "output_hidden_states": True
+        }
+        
+        # Add inputs based on what's provided
+        if input_ids is not None:
+            model_inputs["input_ids"] = input_ids
+        if attention_mask is not None:
+            model_inputs["attention_mask"] = attention_mask
+        if past_key_values is not None:
+            model_inputs["past_key_values"] = past_key_values
+            
+        try:
+            # Try to get the base model's output
+            base_outputs = self.base_model(**model_inputs)
+        except TypeError as e:
+            # If that fails, try with positional arguments for input_ids
+            print(f"Warning: Falling back to positional arguments: {e}")
+            base_outputs = self.base_model(
+                input_ids, 
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                output_hidden_states=True,
+                return_dict=True
+            )
         
         # Get the logits from the base model
         base_logits = base_outputs.logits
@@ -141,18 +177,44 @@ class EmbeddingInfluencedLM(nn.Module):
         if embedding_influence_factor is not None:
             self.embedding_influence_factor = embedding_influence_factor
         
+        try:
+            # Try using the model's built-in generate method first
+            if hasattr(self.base_model, "generate") and kwargs.get("use_base_generate", False):
+                print("Using base model's generate method")
+                # Remove our custom kwargs
+                kwargs.pop("use_base_generate", None)
+                
+                # Call the base model's generate method
+                return self.base_model.generate(
+                    input_ids=input_ids,
+                    max_length=max_length,
+                    temperature=temperature,
+                    top_p=top_p,
+                    **kwargs
+                )
+        except Exception as e:
+            print(f"Base model generate failed, falling back to custom implementation: {e}")
+            # Continue with our custom implementation
+        
+        # Our custom token-by-token generation
         batch_size = input_ids.shape[0]
         generated = input_ids.clone()
         past_key_values = None
         attention_mask = torch.ones_like(input_ids)
         
         for _ in range(max_length):
-            outputs = self.forward(
-                input_ids=generated[:, -1].unsqueeze(-1),
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_embedding_influence=True
-            )
+            try:
+                outputs = self.forward(
+                    input_ids=generated[:, -1].unsqueeze(-1),
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_embedding_influence=True
+                )
+            except Exception as e:
+                print(f"Error during generation: {e}")
+                # Restore original influence factor before returning
+                self.embedding_influence_factor = original_factor
+                return generated
             
             logits = outputs["logits"][:, -1, :] / temperature
             past_key_values = outputs["past_key_values"]
