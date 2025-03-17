@@ -30,7 +30,8 @@ def generate_with_embedding_influence(
     temperature: float = 0.7,
     top_p: float = 0.9,
     max_length: int = 100,
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+    verbose: bool = False
 ):
     """
     Generate text using the embedding-influenced model
@@ -44,15 +45,26 @@ def generate_with_embedding_influence(
         top_p: Top-p sampling parameter
         max_length: Maximum generation length
         device: Device to run generation on
+        verbose: Whether to print generation details
     
     Returns:
         Generated text
     """
+    if verbose:
+        print(f"Generating with embedding influence factor: {embedding_influence_factor}")
+        print(f"Input text: {input_text}")
+    
     # Tokenize input
     input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(device)
     
+    if verbose:
+        print(f"Input length: {input_ids.shape[1]} tokens")
+    
     # Handle multimodal input if available
     if input_images and hasattr(model.base_model, "process_images"):
+        if verbose:
+            print(f"Processing {len(input_images)} images")
+        
         # This assumes the base model has a method to process images
         # You would need to adapt this based on the actual multimodal model implementation
         image_features = model.base_model.process_images(input_images)
@@ -78,6 +90,10 @@ def generate_with_embedding_influence(
     
     # Decode the generated tokens
     generated_text = model.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    if verbose:
+        print(f"Generated {output_ids.shape[1] - input_ids.shape[1]} new tokens")
+        print(f"Total output length: {output_ids.shape[1]} tokens")
     
     return generated_text
 

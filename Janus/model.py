@@ -2,12 +2,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict, Any
 
 class EmbeddingInfluencedLM(nn.Module):
     """
     A language model that uses vector embeddings to directly influence next token generation
     instead of the traditional autoregressive approach of token → embedding → token.
+    
+    This model takes the hidden state (vector embeddings) directly from the base model,
+    projects them to logit space, and combines them with the standard logits to influence
+    token selection. This approach potentially preserves more of the semantic information
+    in the embedding space throughout the generation process.
     """
     
     def __init__(
@@ -36,14 +41,35 @@ class EmbeddingInfluencedLM(nn.Module):
         
         self.device = device
         self.to(device)
+        
+        print(f"Initialized EmbeddingInfluencedLM with:")
+        print(f"  - Base model: {base_model_path}")
+        print(f"  - Embedding dimension: {self.embedding_dim}")
+        print(f"  - Vocabulary size: {len(self.tokenizer)}")
+        print(f"  - Default influence factor: {embedding_influence_factor}")
+        print(f"  - Device: {device}")
     
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
-        use_embedding_influence: bool = True
-    ):
+        use_embedding_influence: bool = True,
+        return_components: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Forward pass through the model.
+        
+        Args:
+            input_ids: Input token IDs
+            attention_mask: Attention mask
+            past_key_values: Past key values for efficient generation
+            use_embedding_influence: Whether to use embedding influence
+            return_components: Whether to return the component logits separately
+            
+        Returns:
+            Dictionary containing model outputs
+        """
         # Get the base model's output
         base_outputs = self.base_model(
             input_ids=input_ids,
@@ -67,11 +93,21 @@ class EmbeddingInfluencedLM(nn.Module):
             combined_logits = (1 - self.embedding_influence_factor) * base_logits + \
                               self.embedding_influence_factor * embedding_logits
             
-            return {
+            result = {
                 "logits": combined_logits,
                 "past_key_values": base_outputs.past_key_values,
                 "hidden_states": base_outputs.hidden_states
             }
+            
+            # Optionally return the component logits for analysis
+            if return_components:
+                result.update({
+                    "base_logits": base_logits,
+                    "embedding_logits": embedding_logits,
+                    "influence_factor": self.embedding_influence_factor
+                })
+                
+            return result
         else:
             # Return the original outputs if not using embedding influence
             return base_outputs
