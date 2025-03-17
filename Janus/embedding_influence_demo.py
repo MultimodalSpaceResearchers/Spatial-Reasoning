@@ -331,12 +331,18 @@ print(f"Max weight value: {projection_weights.max():.6f}")
 # Future work could involve:
 # - Fine-tuning the projection layer for specific tasks
 # - Exploring dynamic influence factors that adapt based on context
-# - Combining this approach with other techniques like continuous thought reasoning (CoCoNuT)import torch
+# - Combining this approach with other techniques like continuous thought reasoning (CoCoNuT)
+
+import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import seaborn as sns
 import os
+import sys
+
+# Add the parent directory to the path to ensure imports work correctly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import our custom modules
 from Janus.model import EmbeddingInfluencedLM
