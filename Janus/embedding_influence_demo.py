@@ -331,4 +331,126 @@ print(f"Max weight value: {projection_weights.max():.6f}")
 # Future work could involve:
 # - Fine-tuning the projection layer for specific tasks
 # - Exploring dynamic influence factors that adapt based on context
-# - Combining this approach with other techniques like continuous thought reasoning (CoCoNuT)
+# - Combining this approach with other techniques like continuous thought reasoning (CoCoNuT)import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import seaborn as sns
+import os
+
+# Import our custom modules
+from Janus.model import EmbeddingInfluencedLM
+from Janus.utils import generate_with_embedding_influence, compare_standard_vs_embedding_influenced, set_seed
+
+def main():
+    # Set a random seed for reproducibility
+    set_seed(42)
+    
+    # Path to your model
+    model_path = '/Users/nover/models/deepseek-ai/Janus-Pro-7B'
+    
+    # Choose device based on what's available
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f"Using device: {device}")
+    
+    # Load the model with a default embedding influence factor
+    print("Loading model...")
+    model = EmbeddingInfluencedLM(
+        base_model_path=model_path,
+        embedding_influence_factor=0.3,  # Default influence factor
+        device=device
+    )
+    
+    print(f"Model loaded successfully with vocabulary size: {len(model.tokenizer)}")
+    
+    # Basic text generation
+    print("\n=== Basic Text Generation ===")
+    simple_prompt = "The quick brown fox jumps over the"
+    
+    print("\nGenerating with standard approach (no embedding influence)...")
+    standard_output = generate_with_embedding_influence(
+        model=model,
+        input_text=simple_prompt,
+        embedding_influence_factor=0.0,  # No influence
+        temperature=0.7
+    )
+    
+    print("\nGenerating with embedding influence...")
+    embedding_output = generate_with_embedding_influence(
+        model=model,
+        input_text=simple_prompt,
+        embedding_influence_factor=0.3,  # Default influence
+        temperature=0.7
+    )
+    
+    print("\nStandard output:")
+    print(standard_output)
+    print("\nEmbedding-influenced output:")
+    print(embedding_output)
+    
+    # Mathematical reasoning
+    print("\n=== Mathematical Reasoning ===")
+    math_problem = "If a train travels at 60 miles per hour, how far will it travel in 2.5 hours?"
+    
+    print("\nComparing standard vs embedding-influenced generation...")
+    standard_math, embedding_math = compare_standard_vs_embedding_influenced(
+        model=model,
+        input_text=math_problem,
+        temperature=0.1,
+        max_length=200
+    )
+    
+    print("\nStandard output:")
+    print(standard_math)
+    print("\nEmbedding-influenced output:")
+    print(embedding_math)
+    
+    # Try with different influence factors
+    print("\n=== Different Influence Factors ===")
+    complex_prompt = "Explain the theory of relativity in simple terms:"
+    
+    influence_factors = [0.0, 0.3, 0.8]
+    for factor in influence_factors:
+        print(f"\n--- Influence Factor: {factor} ---")
+        output = generate_with_embedding_influence(
+            model=model,
+            input_text=complex_prompt,
+            embedding_influence_factor=factor,
+            temperature=0.7,
+            max_length=150
+        )
+        print(output)
+    
+    # Visual reasoning if image is available
+    if os.path.exists("img.jpg"):
+        print("\n=== Visual Reasoning ===")
+        try:
+            image = Image.open("img.jpg")
+            print("Image loaded successfully")
+            
+            visual_question = "What objects are in this image and how are they arranged?"
+            
+            if hasattr(model.base_model, "process_images"):
+                print("\nGenerating responses for visual question...")
+                
+                standard_visual, embedding_visual = compare_standard_vs_embedding_influenced(
+                    model=model,
+                    input_text=visual_question,
+                    input_images=[image],
+                    temperature=0.1
+                )
+                
+                print("\nStandard output:")
+                print(standard_visual)
+                print("\nEmbedding-influenced output:")
+                print(embedding_visual)
+            else:
+                print("\nThis model doesn't support multimodal input directly through our interface.")
+                print("You may need to adapt the code to work with the specific multimodal capabilities of your model.")
+        except Exception as e:
+            print(f"Error processing image: {e}")
+    
+    print("\nDemo completed successfully!")
+
+if __name__ == "__main__":
+    main()

@@ -31,7 +31,17 @@ class EmbeddingInfluencedLM(nn.Module):
         ).to(device)
         
         # Extract embedding dimension from the base model
-        self.embedding_dim = self.base_model.get_input_embeddings().weight.shape[1]
+        try:
+            # Try to get embedding dimension directly
+            self.embedding_dim = self.base_model.get_input_embeddings().weight.shape[1]
+        except (NotImplementedError, AttributeError):
+            # Fallback: try to get it from the model config
+            if hasattr(self.base_model, 'config') and hasattr(self.base_model.config, 'hidden_size'):
+                self.embedding_dim = self.base_model.config.hidden_size
+            else:
+                # Default value for many LLMs
+                self.embedding_dim = 4096
+                print(f"Warning: Could not determine embedding dimension, using default: {self.embedding_dim}")
         
         # Create a projection layer to map embeddings to logit space
         self.embedding_to_logits = nn.Linear(self.embedding_dim, len(self.tokenizer))
