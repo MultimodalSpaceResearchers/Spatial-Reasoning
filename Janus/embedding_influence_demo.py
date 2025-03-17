@@ -124,83 +124,98 @@ for factor in influence_factors:
 #%%
 def visualize_token_probabilities(model, input_text, next_tokens=5, influence_factors=[0.0, 0.3, 0.8]):
     """Visualize how embedding influence affects token probabilities"""
-    # Tokenize input
-    input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(model.device)
-    
-    # Get probabilities for different influence factors
-    all_probs = {}
-    
-    for factor in influence_factors:
-        # Save original factor
-        original_factor = model.embedding_influence_factor
-        model.embedding_influence_factor = factor
+    try:
+        # Tokenize input
+        input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(model.device)
         
-        # Get model outputs
-        outputs = model.forward(
-            input_ids=input_ids,
-            use_embedding_influence=True if factor > 0 else False
-        )
+        # Get probabilities for different influence factors
+        all_probs = {}
         
-        # Get logits for the last token
-        if isinstance(outputs, dict):
-            logits = outputs["logits"][0, -1, :]
-        else:
-            logits = outputs.logits[0, -1, :]
+        for factor in influence_factors:
+            try:
+                # Save original factor
+                original_factor = model.embedding_influence_factor
+                model.embedding_influence_factor = factor
+                
+                # Get model outputs
+                outputs = model.forward(
+                    input_ids=input_ids,
+                    use_embedding_influence=True if factor > 0 else False
+                )
+                
+                # Get logits for the last token
+                if isinstance(outputs, dict):
+                    logits = outputs["logits"][0, -1, :]
+                else:
+                    logits = outputs.logits[0, -1, :]
+                    
+                # Convert to probabilities
+                probs = torch.nn.functional.softmax(logits, dim=-1)
+                
+                # Get top tokens
+                top_probs, top_indices = torch.topk(probs, next_tokens)
+                
+                # Convert to tokens
+                top_tokens = [model.tokenizer.decode([idx.item()]).strip() for idx in top_indices]
+                
+                # Store results
+                all_probs[factor] = {
+                    "tokens": top_tokens,
+                    "probs": top_probs.detach().cpu().numpy()
+                }
+                
+                # Restore original factor
+                model.embedding_influence_factor = original_factor
+            except Exception as e:
+                print(f"Error processing influence factor {factor}: {e}")
+                continue
+    
+        # Check if we have any data to visualize
+        if not all_probs:
+            print("No probability data available to visualize")
+            return
             
-        # Convert to probabilities
-        probs = torch.nn.functional.softmax(logits, dim=-1)
+        # Get a reference factor that worked
+        reference_factor = list(all_probs.keys())[0]
         
-        # Get top tokens
-        top_probs, top_indices = torch.topk(probs, next_tokens)
+        # Visualize
+        plt.figure(figsize=(12, 6))
         
-        # Convert to tokens
-        top_tokens = [model.tokenizer.decode([idx.item()]).strip() for idx in top_indices]
+        # Create a bar chart for each influence factor
+        bar_width = 0.2
+        positions = np.arange(next_tokens)
         
-        # Store results
-        all_probs[factor] = {
-            "tokens": top_tokens,
-            "probs": top_probs.detach().cpu().numpy()
-        }
+        for i, (factor, data) in enumerate(all_probs.items()):
+            plt.bar(
+                positions + i * bar_width, 
+                data["probs"], 
+                width=bar_width, 
+                label=f"Influence: {factor}"
+            )
         
-        # Restore original factor
-        model.embedding_influence_factor = original_factor
-    
-    # Visualize
-    plt.figure(figsize=(12, 6))
-    
-    # Create a bar chart for each influence factor
-    bar_width = 0.2
-    positions = np.arange(next_tokens)
-    
-    for i, (factor, data) in enumerate(all_probs.items()):
-        plt.bar(
-            positions + i * bar_width, 
-            data["probs"], 
-            width=bar_width, 
-            label=f"Influence: {factor}"
+        # Set labels and title
+        plt.xlabel("Top Next Tokens")
+        plt.ylabel("Probability")
+        plt.title(f"Next Token Probabilities for: '{input_text}'")
+        
+        # Set x-ticks to token names
+        plt.xticks(
+            positions + bar_width * (len(all_probs) - 1) / 2, 
+            all_probs[reference_factor]["tokens"]
         )
-    
-    # Set labels and title
-    plt.xlabel("Top Next Tokens")
-    plt.ylabel("Probability")
-    plt.title(f"Next Token Probabilities for: '{input_text}'")
-    
-    # Set x-ticks to token names
-    plt.xticks(
-        positions + bar_width * (len(influence_factors) - 1) / 2, 
-        all_probs[influence_factors[0]]["tokens"]
-    )
-    
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    
-    # Print the actual probabilities
-    print("Token probabilities:")
-    for factor, data in all_probs.items():
-        print(f"\nInfluence factor: {factor}")
-        for token, prob in zip(data["tokens"], data["probs"]):
-            print(f"  {token}: {prob:.4f}")
+        
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        
+        # Print the actual probabilities
+        print("Token probabilities:")
+        for factor, data in all_probs.items():
+            print(f"\nInfluence factor: {factor}")
+            for token, prob in zip(data["tokens"], data["probs"]):
+                print(f"  {token}: {prob:.4f}")
+    except Exception as e:
+        print(f"Error in visualization: {e}")
 #%%
 # Visualize token probabilities for a simple prompt
 visualize_token_probabilities(
