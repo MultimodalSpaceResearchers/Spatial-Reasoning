@@ -1,178 +1,143 @@
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from PIL import Image
+from typing import List, Optional, Tuple, Union
 
-class MultiModalityCausalLM(nn.Module):
-    def __init__(self, model_id="gpt2", embedding_dim=768):
+class EmbeddingInfluencedLM(nn.Module):
+    """
+    A language model that uses vector embeddings to directly influence next token generation
+    instead of the traditional autoregressive approach of token → embedding → token.
+    """
+    
+    def __init__(
+        self,
+        base_model_path: str,
+        embedding_influence_factor: float = 0.3,
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ):
         super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.base_model = AutoModelForCausalLM.from_pretrained(model_id)
-        self.embedding_dim = embedding_dim
         
-        # Image processing components
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(128 * 28 * 28, embedding_dim)
-        )
+        # Load the base model and tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+        self.base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_path, 
+            trust_remote_code=True
+        ).to(device)
         
-        self.image_decoder = nn.Sequential(
-            nn.Linear(embedding_dim, 128 * 28 * 28),
-            nn.Unflatten(1, (128, 28, 28)),
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 3, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.Sigmoid()
-        )
+        # Extract embedding dimension from the base model
+        self.embedding_dim = self.base_model.get_input_embeddings().weight.shape[1]
         
-    @classmethod
-    def from_pretrained(cls, model_path):
-        """Load model from a pretrained checkpoint"""
-        model = cls()
-        # Load weights from checkpoint
-        state_dict = torch.load(model_path, map_location="cpu")
-        model.load_state_dict(state_dict)
-        return model
-    
-    def get_input_embeddings(self):
-        """Return the input embeddings layer from the base model"""
-        return self.base_model.get_input_embeddings()
-    
-    def encode_image(self, image):
-        """Encode an image into embedding space"""
-        return self.image_encoder(image).unsqueeze(1)  # Add sequence dimension
-    
-    def decode_image_embeddings(self, embeddings):
-        """Decode embeddings back to image space"""
-        return self.image_decoder(embeddings.squeeze(1))
-    
-    def embeddings_to_text(self, embeddings):
-        """Convert embeddings back to text using nearest neighbor lookup"""
-        # Get the embedding matrix
-        embedding_matrix = self.get_input_embeddings().weight
+        # Create a projection layer to map embeddings to logit space
+        self.embedding_to_logits = nn.Linear(self.embedding_dim, len(self.tokenizer))
         
-        # For each embedding, find the closest token embedding
-        token_ids = []
-        for i in range(embeddings.size(1)):
-            # Get the embedding at position i
-            emb = embeddings[:, i, :]
-            
-            # Compute cosine similarity with all token embeddings
-            similarities = torch.nn.functional.cosine_similarity(
-                emb.unsqueeze(1), 
-                embedding_matrix.unsqueeze(0),
-                dim=2
-            )
-            
-            # Get the token with highest similarity
-            token_id = similarities.argmax(dim=1)
-            token_ids.append(token_id.item())
+        # Factor to control how much the embeddings directly influence token generation
+        self.embedding_influence_factor = embedding_influence_factor
         
-        # Convert token IDs to text
-        return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+        self.device = device
+        self.to(device)
     
-    def generate(self, input_ids, attention_mask=None, temperature=1.0, max_length=100, do_sample=True):
-        """Traditional token-based generation"""
-        return self.base_model.generate(
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        use_embedding_influence: bool = True
+    ):
+        # Get the base model's output
+        base_outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_length=max_length,
-            do_sample=do_sample,
-            temperature=temperature
+            past_key_values=past_key_values,
+            output_hidden_states=True,
+            return_dict=True
         )
+        
+        # Get the logits from the base model
+        base_logits = base_outputs.logits
+        
+        if use_embedding_influence:
+            # Get the last hidden state (embeddings)
+            last_hidden_state = base_outputs.hidden_states[-1]
+            
+            # Project embeddings directly to logit space
+            embedding_logits = self.embedding_to_logits(last_hidden_state)
+            
+            # Combine the base logits with the embedding-influenced logits
+            combined_logits = (1 - self.embedding_influence_factor) * base_logits + \
+                              self.embedding_influence_factor * embedding_logits
+            
+            return {
+                "logits": combined_logits,
+                "past_key_values": base_outputs.past_key_values,
+                "hidden_states": base_outputs.hidden_states
+            }
+        else:
+            # Return the original outputs if not using embedding influence
+            return base_outputs
     
-    def generate_with_embeddings(self, input_embeddings, attention_mask=None, temperature=1.0, 
-                                max_length=100, return_trajectory=False):
-        """Generate text using embeddings directly without converting to tokens at each step"""
-        batch_size, seq_len, _ = input_embeddings.size()
-        device = input_embeddings.device
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_length: int = 100,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        embedding_influence_factor: Optional[float] = None,
+        **kwargs
+    ):
+        """
+        Custom generation function that incorporates embedding influence
+        """
+        # Save original influence factor to restore later
+        original_factor = self.embedding_influence_factor
         
-        # Initialize attention mask if not provided
-        if attention_mask is None:
-            attention_mask = torch.ones((batch_size, seq_len), device=device)
+        # Override influence factor if provided
+        if embedding_influence_factor is not None:
+            self.embedding_influence_factor = embedding_influence_factor
         
-        # Store the trajectory if requested
-        trajectory = [] if return_trajectory else None
-        if return_trajectory:
-            for i in range(seq_len):
-                trajectory.append(input_embeddings[:, i, :].clone())
+        batch_size = input_ids.shape[0]
+        generated = input_ids.clone()
+        past_key_values = None
+        attention_mask = torch.ones_like(input_ids)
         
-        # Generate up to max_length
-        for _ in range(max_length - seq_len):
-            # Forward pass through the model
-            outputs = self.base_model(
-                inputs_embeds=input_embeddings,
+        for _ in range(max_length):
+            outputs = self.forward(
+                input_ids=generated[:, -1].unsqueeze(-1),
                 attention_mask=attention_mask,
-                return_dict=True
+                past_key_values=past_key_values,
+                use_embedding_influence=True
             )
             
-            # Get the next token logits
-            next_token_logits = outputs.logits[:, -1, :]
+            logits = outputs["logits"][:, -1, :] / temperature
+            past_key_values = outputs["past_key_values"]
             
-            # Apply temperature
-            next_token_logits = next_token_logits / max(temperature, 1e-8)
+            # Apply top-p sampling
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
             
-            # Sample from the distribution
-            if temperature == 0:
-                # Greedy decoding
-                next_token_id = torch.argmax(next_token_logits, dim=-1)
-            else:
-                # Sample from the distribution
-                probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
-                next_token_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            # Shift the indices to the right to keep also the first token above the threshold
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
             
-            # Get the embedding for the next token
-            next_token_embedding = self.get_input_embeddings()(next_token_id).unsqueeze(1)
+            for b in range(batch_size):
+                indices_to_remove = sorted_indices[b][sorted_indices_to_remove[b]]
+                logits[b, indices_to_remove] = float('-inf')
             
-            # Concatenate with the existing embeddings
-            input_embeddings = torch.cat([input_embeddings, next_token_embedding], dim=1)
+            # Sample next token
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
             
-            # Update attention mask
-            attention_mask = torch.cat([
-                attention_mask, 
-                torch.ones((batch_size, 1), device=device)
-            ], dim=1)
+            # Append to generated
+            generated = torch.cat([generated, next_token], dim=-1)
+            attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
             
-            # Store in trajectory if requested
-            if return_trajectory:
-                trajectory.append(next_token_embedding.squeeze(1).clone())
+            # Check if EOS token is generated
+            if (next_token == self.tokenizer.eos_token_id).any():
+                break
         
-        if return_trajectory:
-            return input_embeddings, trajectory
-        return input_embeddings
-    
-    def generate_image_with_embeddings(self, text_embeddings, guidance_scale=7.5, num_inference_steps=50):
-        """Generate an image from text embeddings using diffusion-like process"""
-        batch_size = text_embeddings.size(0)
-        device = text_embeddings.device
+        # Restore original influence factor
+        self.embedding_influence_factor = original_factor
         
-        # Initialize random noise
-        image_embeddings = torch.randn(batch_size, self.embedding_dim, device=device)
-        
-        # Simple diffusion-like process
-        for i in range(num_inference_steps):
-            # Get noise scale for this step
-            noise_scale = 1.0 - (i / num_inference_steps)
-            
-            # Get conditioning scale for this step
-            cond_scale = guidance_scale * (1.0 - noise_scale)
-            
-            # Apply conditioning from text embeddings
-            text_cond = text_embeddings.mean(dim=1)  # Average text embeddings
-            image_embeddings = noise_scale * image_embeddings + cond_scale * text_cond
-            
-            # Add some noise to keep stochasticity
-            if i < num_inference_steps - 1:
-                noise = torch.randn_like(image_embeddings) * (noise_scale * 0.5)
-                image_embeddings = image_embeddings + noise
-        
-        return image_embeddings
+        return generated

@@ -1,66 +1,120 @@
 import torch
-from PIL import Image
 import numpy as np
-from torchvision import transforms
+from typing import List, Optional, Union
+from PIL import Image
 
-def load_image(image_path):
-    """Load an image from a file path"""
-    return Image.open(image_path).convert('RGB')
+def set_seed(seed: int):
+    """Set random seed for reproducibility"""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
-def preprocess_image(image, target_size=(224, 224)):
-    """Preprocess an image for the model"""
-    # Define the preprocessing pipeline
-    preprocess = transforms.Compose([
-        transforms.Resize(target_size),
-        transforms.ToTensor(),
-    ])
+def load_model(model_path: str, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+    """
+    Load the embedding-influenced model
+    """
+    from Janus.model import EmbeddingInfluencedLM
     
-    # Apply preprocessing
-    return preprocess(image).unsqueeze(0)  # Add batch dimension
+    model = EmbeddingInfluencedLM(
+        base_model_path=model_path,
+        device=device
+    )
+    return model
 
-def display_images(images, titles=None, figsize=(15, 5)):
-    """Display a list of images with optional titles"""
-    import matplotlib.pyplot as plt
+def generate_with_embedding_influence(
+    model,
+    input_text: str,
+    input_images: Optional[List[Image.Image]] = None,
+    embedding_influence_factor: float = 0.3,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    max_length: int = 100,
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+):
+    """
+    Generate text using the embedding-influenced model
     
-    n = len(images)
-    fig, axes = plt.subplots(1, n, figsize=figsize)
+    Args:
+        model: The EmbeddingInfluencedLM model
+        input_text: The input text prompt
+        input_images: Optional list of input images (for multimodal models)
+        embedding_influence_factor: How much the embeddings directly influence token generation
+        temperature: Sampling temperature
+        top_p: Top-p sampling parameter
+        max_length: Maximum generation length
+        device: Device to run generation on
     
-    # Handle the case of a single image
-    if n == 1:
-        axes = [axes]
+    Returns:
+        Generated text
+    """
+    # Tokenize input
+    input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(device)
     
-    for i, (img, ax) in enumerate(zip(images, axes)):
-        # Convert tensor to numpy if needed
-        if isinstance(img, torch.Tensor):
-            img = img.cpu().detach().numpy().transpose(1, 2, 0)
-            # Normalize if needed
-            if img.max() <= 1.0:
-                img = (img * 255).astype(np.uint8)
+    # Handle multimodal input if available
+    if input_images and hasattr(model.base_model, "process_images"):
+        # This assumes the base model has a method to process images
+        # You would need to adapt this based on the actual multimodal model implementation
+        image_features = model.base_model.process_images(input_images)
         
-        # Convert numpy array to PIL Image if needed
-        if isinstance(img, np.ndarray):
-            img = Image.fromarray(img.astype(np.uint8))
-        
-        # Display the image
-        ax.imshow(img)
-        ax.axis('off')
-        
-        # Set title if provided
-        if titles and i < len(titles):
-            ax.set_title(titles[i])
+        # Generate with image context
+        output_ids = model.generate(
+            input_ids=input_ids,
+            image_features=image_features,
+            max_length=max_length,
+            temperature=temperature,
+            top_p=top_p,
+            embedding_influence_factor=embedding_influence_factor
+        )
+    else:
+        # Text-only generation
+        output_ids = model.generate(
+            input_ids=input_ids,
+            max_length=max_length,
+            temperature=temperature,
+            top_p=top_p,
+            embedding_influence_factor=embedding_influence_factor
+        )
     
-    plt.tight_layout()
-    plt.show()
+    # Decode the generated tokens
+    generated_text = model.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    return generated_text
 
-def cosine_similarity(a, b):
-    """Compute cosine similarity between two vectors"""
-    return torch.nn.functional.cosine_similarity(a, b, dim=-1)
-
-def interpolate_embeddings(emb1, emb2, steps=10):
-    """Linearly interpolate between two embeddings"""
-    interpolations = []
-    for i in range(steps + 1):
-        alpha = i / steps
-        interpolated = (1 - alpha) * emb1 + alpha * emb2
-        interpolations.append(interpolated)
-    return torch.stack(interpolations)
+def compare_standard_vs_embedding_influenced(
+    model,
+    input_text: str,
+    input_images: Optional[List[Image.Image]] = None,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    max_length: int = 100
+):
+    """
+    Compare standard generation vs embedding-influenced generation
+    
+    Returns:
+        Tuple of (standard_output, embedding_influenced_output)
+    """
+    # Standard generation (no embedding influence)
+    standard_output = generate_with_embedding_influence(
+        model=model,
+        input_text=input_text,
+        input_images=input_images,
+        embedding_influence_factor=0.0,  # No influence
+        temperature=temperature,
+        top_p=top_p,
+        max_length=max_length
+    )
+    
+    # Embedding-influenced generation
+    embedding_output = generate_with_embedding_influence(
+        model=model,
+        input_text=input_text,
+        input_images=input_images,
+        embedding_influence_factor=0.3,  # Default influence
+        temperature=temperature,
+        top_p=top_p,
+        max_length=max_length
+    )
+    
+    return standard_output, embedding_output
