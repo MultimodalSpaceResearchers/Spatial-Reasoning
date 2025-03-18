@@ -54,8 +54,8 @@ def generate_with_embedding_influence(
         print(f"Generating with embedding influence factor: {embedding_influence_factor}")
         print(f"Input text: {input_text}")
     
-    # Tokenize input
-    input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(device)
+    # Tokenize input and ensure it's on the model's device
+    input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(model.device)
     
     if verbose:
         print(f"Input length: {input_ids.shape[1]} tokens")

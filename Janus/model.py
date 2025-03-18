@@ -180,6 +180,9 @@ class EmbeddingInfluencedLM(nn.Module):
                     print("Warning: No hidden states found, using logits as fallback")
                     last_hidden_state = base_logits
                 
+                # Ensure tensors are on the correct device
+                last_hidden_state = last_hidden_state.to(self.device)
+                
                 # Project embeddings directly to logit space
                 embedding_logits = self.embedding_to_logits(last_hidden_state)
                 
@@ -274,8 +277,8 @@ class EmbeddingInfluencedLM(nn.Module):
                     print("Error: Forward pass did not return expected output format")
                     break
             
-                # Get logits for the last position
-                logits = outputs["logits"][:, -1, :] / temperature
+                # Get logits for the last position and ensure they're on the right device
+                logits = outputs["logits"][:, -1, :].to(self.device) / temperature
                 
                 # Store past key values if available
                 if "past_key_values" in outputs and outputs["past_key_values"] is not None:

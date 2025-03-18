@@ -125,8 +125,9 @@ for factor in influence_factors:
 def visualize_token_probabilities(model, input_text, next_tokens=5, influence_factors=[0.0, 0.3, 0.8]):
     """Visualize how embedding influence affects token probabilities"""
     try:
-        # Tokenize input
+        # Tokenize input and ensure it's on the correct device
         input_ids = model.tokenizer.encode(input_text, return_tensors="pt").to(model.device)
+        print(f"Input device: {input_ids.device}, Model device: {model.device}")
         
         # Get probabilities for different influence factors
         all_probs = {}
