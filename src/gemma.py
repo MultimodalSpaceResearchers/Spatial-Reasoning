@@ -246,7 +246,7 @@ def forward(
             output_vec = outputs.hidden_states[-1][-1][-1]
             cosine_sim = F.cosine_similarity(true_embed, output_vec, dim=-1)
             matches = rank_tokens_by_similarity(true_embedding_dim, output_vec, processor, top_k=int(print_similarity_scores))
-            sim_report = f"Decoded Output: {decoded_output} ({cosine_sim.mean().item()}); possibilities: {matches}"
+            sim_report = f"Decoded Output: {decoded_output.strip()} ({cosine_sim.mean().item()}); possibilities: {matches}"
             if pbar is not None:
                 pbar.set_postfix(similarity=sim_report)
             else:
@@ -337,8 +337,8 @@ def generate(
     past_embeddings = None
     global pbar
     if "progress_bar" in kwargs:
-        max_new_tokens = kwargs.pop("max_new_tokens") if 'max_new_tokens' in kwargs else None
-        pbar = tqdm(total= max_new_tokens, postfix={'similarity': 'n/a'})
+        total_pbar = kwargs.get("max_new_tokens", None)
+        pbar = tqdm(total=total_pbar, postfix={'similarity': 'n/a'})
     # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
     self._validate_model_class()
     tokenizer = kwargs.pop("tokenizer", None)  # Pull this out first, we only use it for stopping criteria
@@ -774,7 +774,7 @@ def main():
         {
             "role": "system",
             "content": [{"type": "text",
-                         "text": "You are a helpful assistant. Answer as briefly as possible."}],
+                         "text": "You are a helpful assistant."}],
         },
         {
             "role": "user",
@@ -792,7 +792,7 @@ def main():
     input_len = inputs["input_ids"].shape[-1]
 
     with torch.inference_mode():
-        generation = model.generate(**inputs, max_new_tokens=100, progress_bar=True, do_sample=False, print_similarity_scores=2, processor=processor, use_cache=False, coconut=.1)
+        generation = model.generate(**inputs, max_new_tokens=1000, progress_bar=True, print_similarity_scores=2, processor=processor, use_cache=False, coconut=None)
         text_generation = generation[0][input_len:]
 
     decoded = processor.decode(text_generation, skip_special_tokens=True)
