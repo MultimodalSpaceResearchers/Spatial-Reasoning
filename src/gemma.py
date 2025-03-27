@@ -74,7 +74,7 @@ def rank_tokens_by_similarity(target_vectors, token_embedding, processor, top_k=
 # return embedding_vector
 
 past_embeddings = None
-
+pbar: tqdm = None
 
 @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
 @add_start_docstrings_to_model_forward(GEMMA3_INPUTS_DOCSTRING)
@@ -95,9 +95,10 @@ def forward(
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        print_similarity_scores: bool = False,
+        print_similarity_scores: int = None,
         processor = None,
-        coconut=False,
+        coconut: float =False,
+        progress_bar=None,
         **lm_kwargs,
     ) -> Union[Tuple, Gemma3CausalLMOutputWithPast]:
         r"""
@@ -137,6 +138,8 @@ def forward(
         "answer en Where is the cow standing?\nbeach"
         ```"""
         global past_embeddings
+        global pbar
+
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -156,13 +159,13 @@ def forward(
         else:
             llm_input_ids = input_ids
 
-        if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings()(llm_input_ids)
-        if coconut:
+        if coconut is not None:
             if past_embeddings is None:
-                past_embeddings = torch.zeros((inputs_embeds.shape[0], 1, inputs_embeds.shape[2]), device=inputs_embeds.device)
-            inputs_embeds = past_embeddings
-            pass
+                past_embeddings = self.get_input_embeddings()(llm_input_ids)
+            text_embeds = self.get_input_embeddings()(llm_input_ids)
+            inputs_embeds = (coconut * past_embeddings) + (1 - coconut) * text_embeds
+        elif inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings()(llm_input_ids)
 
 
         if cache_position is None:
@@ -225,19 +228,29 @@ def forward(
 
         logits = outputs.logits
         loss = None
+        if pbar:
+            pbar.update(1)
+            if processor:
+                output_ids = torch.argmax(logits, dim=-1)
+                decoded_output = processor.decode(output_ids.squeeze().tolist(), skip_special_tokens=True)
+                pbar.set_description(decoded_output.strip())
 
         if coconut:
             past_embeddings = torch.cat((past_embeddings, outputs.hidden_states[-1][:, -1:, :]), dim=1)
 
-        if print_similarity_scores and processor:
+        if print_similarity_scores is not None and processor:
             output_ids = torch.argmax(logits, dim=-1)
             true_embedding_dim = self.get_input_embeddings().weight
             decoded_output = processor.decode(output_ids.squeeze().tolist(), skip_special_tokens=True)
             true_embed = true_embedding_dim[output_ids.squeeze()]
             output_vec = outputs.hidden_states[-1][-1][-1]
             cosine_sim = F.cosine_similarity(true_embed, output_vec, dim=-1)
-            matches = rank_tokens_by_similarity(true_embedding_dim, output_vec, processor, top_k=1)
-            print(f"Decoded Output: {decoded_output} ({cosine_sim.mean().item()}); possibilities: {matches}")  # Added line to print decoded text
+            matches = rank_tokens_by_similarity(true_embedding_dim, output_vec, processor, top_k=int(print_similarity_scores))
+            sim_report = f"Decoded Output: {decoded_output} ({cosine_sim.mean().item()}); possibilities: {matches}"
+            if pbar is not None:
+                pbar.set_postfix(similarity=sim_report)
+            else:
+                print(sim_report)
 
         if labels is not None:
             # Upcast to float if we need to compute the loss to avoid potential precision issues
@@ -320,7 +333,12 @@ def generate(
         Union[GenerateOutput, torch.LongTensor]: Returns either a structured output object containing 
         the generated tokens alongside additional generation metadata or a plain tensor of the generated token IDs.
     """
-
+    global past_embeddings
+    past_embeddings = None
+    global pbar
+    if "progress_bar" in kwargs:
+        max_new_tokens = kwargs.pop("max_new_tokens") if 'max_new_tokens' in kwargs else None
+        pbar = tqdm(total= max_new_tokens, postfix={'similarity': 'n/a'})
     # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
     self._validate_model_class()
     tokenizer = kwargs.pop("tokenizer", None)  # Pull this out first, we only use it for stopping criteria
@@ -756,7 +774,7 @@ def main():
         {
             "role": "system",
             "content": [{"type": "text",
-                         "text": "You are a helpful assistant."}]
+                         "text": "You are a helpful assistant. Answer as briefly as possible."}],
         },
         {
             "role": "user",
@@ -774,7 +792,7 @@ def main():
     input_len = inputs["input_ids"].shape[-1]
 
     with torch.inference_mode():
-        generation = model.generate(**inputs, max_new_tokens=100, do_sample=False, use_cache=False, print_similarity_scores=True, processor=processor, coconut=True)
+        generation = model.generate(**inputs, max_new_tokens=100, progress_bar=True, do_sample=False, print_similarity_scores=2, processor=processor, use_cache=False, coconut=.1)
         text_generation = generation[0][input_len:]
 
     decoded = processor.decode(text_generation, skip_special_tokens=True)
