@@ -76,13 +76,15 @@ def rank_tokens_by_similarity(target_vectors, token_embedding, processor, top_k=
 past_embeddings = None
 pbar: tqdm = None
 
+
+@can_return_tuple
 @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
 @add_start_docstrings_to_model_forward(GEMMA3_INPUTS_DOCSTRING)
 @replace_return_docstrings(output_type=Gemma3CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
 def forward(
         self,
-        input_ids: torch.LongTensor = None,
-        pixel_values: torch.FloatTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
@@ -93,7 +95,6 @@ def forward(
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         print_similarity_scores: int = None,
         processor = None,
@@ -123,20 +124,37 @@ def forward(
         >>> import requests
         >>> from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 
-        >>> model = Gemma3ForConditionalGeneration.from_pretrained("google/Gemma3-test-224px-hf")
-        >>> processor = AutoProcessor.from_pretrained("google/Gemma3-test-224px-hf")
+        >>> model = Gemma3ForConditionalGeneration.from_pretrained("google/gemma-3-4b-it")
+        >>> processor = AutoProcessor.from_pretrained("google/gemma-3-4b-it")
 
-        >>> prompt = "answer en Where is the cow standing?"
-        >>> url = "https://huggingface.co/gv-hf/Gemma3-test-224px-hf/resolve/main/cow_beach_1.png"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> messages = [
+        ...     {
+        ...         "role": "system",
+        ...         "content": [
+        ...             {"type": "text", "text": "You are a helpful assistant."}
+        ...         ]
+        ...     },
+        ...     {
+        ...         "role": "user", "content": [
+        ...             {"type": "image", "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg"},
+        ...             {"type": "text", "text": "Where is the cat standing?"},
+        ...         ]
+        ...     },
+        ... ]
 
-        >>> inputs = processor(images=image, text=prompt,  return_tensors="pt")
-
+        >>> inputs = processor.apply_chat_template(
+        ...     messages,
+        ...     tokenizer=True,
+        ...     return_dict=True,
+        ...     return_tensors="pt",
+        ...     add_generation_prompt=True
+        ... )
         >>> # Generate
-        >>> generate_ids = model.generate(**inputs, max_length=30)
+        >>> generate_ids = model.generate(**inputs)
         >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "answer en Where is the cow standing?\nbeach"
-        ```"""
+        "user\nYou are a helpful assistant.\n\n\n\n\n\nWhere is the cat standing?\nmodel\nBased on the image, the cat is standing in a snowy area, likely outdoors. It appears to"
+        ```
+        """
         global past_embeddings
         global pbar
 
@@ -147,7 +165,6 @@ def forward(
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         is_training = token_type_ids is not None and labels is not None
 
@@ -210,7 +227,7 @@ def forward(
         causal_mask = self._update_causal_mask(
             attention_mask, token_type_ids, past_key_values, cache_position, inputs_embeds, is_training
         )
-        outputs = self.language_model(
+        outputs: CausalLMOutputWithPast = self.language_model(
             attention_mask=causal_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -219,12 +236,10 @@ def forward(
             output_attentions=output_attentions,
             # output_hidden_states=output_hidden_states,
             output_hidden_states=True,
-            return_dict=return_dict,
             cache_position=cache_position,
             logits_to_keep=logits_to_keep,
             **lm_kwargs,
         )
-        pass
 
         logits = outputs.logits
         loss = None
@@ -272,9 +287,6 @@ def forward(
             flat_logits = shift_logits.view(-1, self.config.text_config.vocab_size)
             flat_labels = shift_labels.view(-1).to(shift_logits.device)
             loss = loss_fct(flat_logits, flat_labels)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
 
         return Gemma3CausalLMOutputWithPast(
             loss=loss,
@@ -284,7 +296,6 @@ def forward(
             attentions=outputs.attentions,
             image_hidden_states=image_features if pixel_values is not None else None,
         )
-
 
 
 @torch.no_grad()
@@ -300,38 +311,96 @@ def generate(
         streamer: Optional["BaseStreamer"] = None,
         negative_prompt_ids: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        use_model_defaults: Optional[bool] = None,
         **kwargs,
-    ) -> Union[GenerateOutput, torch.LongTensor]:
-    """
-    Generates a sequence of tokens based on the provided input configurations. Provides a highly customizable sequence 
-    generation process with options for configuring generation parameters, token filtering, stopping criteria, 
-    cache preparation, assisted models, and more. This function also supports various generation modes such as 
-    deterministic or stochastic sampling and beam search. It ensures parameter validation, compatibility checks with 
-    generation configuration, and handles device mismatches between input tensors and the model.
+) -> Union[GenerateOutput, torch.LongTensor]:
+    r"""
 
-    Args:
-        self: Represents the instance of the class on which the method is being called.
-        inputs: Input tensor for the generation process. Can include input IDs or embeddings.
-        generation_config: Configuration settings for the generation process, such as logits 
-            processing, stopping criteria, beam size, and tokenization rules.
-        logits_processor: Optional list of preprocessing functions applied to the output logits.
-        stopping_criteria: Optional list of stopping mechanisms to end sequence generation, such as 
-            maximum length or EOS tokens.
-        prefix_allowed_tokens_fn: Optional callback function defining token constraints; restricts 
-            prefix tokens during generation.
-        synced_gpus: Specifies if GPUs are synchronized, typically necessary for distributed generation 
-            with multiple GPUs.
-        assistant_model: Optional pre-trained model used for assisted generation tasks.
-        streamer: Optional stream object to output generated tokens asynchronously.
-        negative_prompt_ids: Specifies negative prompts for generation, biasing the model 
-            against certain outputs.
-        negative_prompt_attention_mask: Provides attention masks to filter out tokens from 
-            the negative prompts.
-        **kwargs: Additional arguments passed to adjust generation parameters or provide customized options.
+    Generates sequences of token ids for models with a language modeling head.
 
-    Returns:
-        Union[GenerateOutput, torch.LongTensor]: Returns either a structured output object containing 
-        the generated tokens alongside additional generation metadata or a plain tensor of the generated token IDs.
+    <Tip warning={true}>
+
+    Most generation-controlling parameters are set in `generation_config` which, if not passed, will be set to the
+    model's default generation configuration. You can override any `generation_config` by passing the corresponding
+    parameters to generate(), e.g. `.generate(inputs, num_beams=4, do_sample=True)`.
+
+    For an overview of generation strategies and code examples, check out the [following
+    guide](../generation_strategies).
+
+    </Tip>
+
+    Parameters:
+        inputs (`torch.Tensor` of varying shape depending on the modality, *optional*):
+            The sequence used as a prompt for the generation or as model inputs to the encoder. If `None` the
+            method initializes it with `bos_token_id` and a batch size of 1. For decoder-only models `inputs`
+            should be in the format of `input_ids`. For encoder-decoder models *inputs* can represent any of
+            `input_ids`, `input_values`, `input_features`, or `pixel_values`.
+        generation_config ([`~generation.GenerationConfig`], *optional*):
+            The generation configuration to be used as base parametrization for the generation call. `**kwargs`
+            passed to generate matching the attributes of `generation_config` will override them. If
+            `generation_config` is not provided, the default will be used, which has the following loading
+            priority: 1) from the `generation_config.json` model file, if it exists; 2) from the model
+            configuration. Please note that unspecified parameters will inherit [`~generation.GenerationConfig`]'s
+            default values, whose documentation should be checked to parameterize generation.
+        logits_processor (`LogitsProcessorList`, *optional*):
+            Custom logits processors that complement the default logits processors built from arguments and
+            generation config. If a logit processor is passed that is already created with the arguments or a
+            generation config an error is thrown. This feature is intended for advanced users.
+        stopping_criteria (`StoppingCriteriaList`, *optional*):
+            Custom stopping criteria that complements the default stopping criteria built from arguments and a
+            generation config. If a stopping criteria is passed that is already created with the arguments or a
+            generation config an error is thrown. If your stopping criteria depends on the `scores` input, make
+            sure you pass `return_dict_in_generate=True, output_scores=True` to `generate`. This feature is
+            intended for advanced users.
+        prefix_allowed_tokens_fn (`Callable[[int, torch.Tensor], List[int]]`, *optional*):
+            If provided, this function constraints the beam search to allowed tokens only at each step. If not
+            provided no constraint is applied. This function takes 2 arguments: the batch ID `batch_id` and
+            `input_ids`. It has to return a list with the allowed tokens for the next generation step conditioned
+            on the batch ID `batch_id` and the previously generated tokens `inputs_ids`. This argument is useful
+            for constrained generation conditioned on the prefix, as described in [Autoregressive Entity
+            Retrieval](https://arxiv.org/abs/2010.00904).
+        synced_gpus (`bool`, *optional*):
+            Whether to continue running the while loop until max_length. Unless overridden, this flag will be set
+            to `True` if using `FullyShardedDataParallel` or DeepSpeed ZeRO Stage 3 with multiple GPUs to avoid
+            deadlocking if one GPU finishes generating before other GPUs. Otherwise, defaults to `False`.
+        assistant_model (`PreTrainedModel`, *optional*):
+            An assistant model that can be used to accelerate generation. The assistant model must have the exact
+            same tokenizer. The acceleration is achieved when forecasting candidate tokens with the assistant model
+            is much faster than running generation with the model you're calling generate from. As such, the
+            assistant model should be much smaller.
+        streamer (`BaseStreamer`, *optional*):
+            Streamer object that will be used to stream the generated sequences. Generated tokens are passed
+            through `streamer.put(token_ids)` and the streamer is responsible for any further processing.
+        negative_prompt_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            The negative prompt needed for some processors such as CFG. The batch size must match the input batch
+            size. This is an experimental feature, subject to breaking API changes in future versions.
+        negative_prompt_attention_mask (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Attention_mask for `negative_prompt_ids`.
+        use_model_defaults (`bool`, *optional*):
+            When it is `True`, unset parameters in `generation_config` will be set to the model-specific default
+            generation configuration (`model.generation_config`), as opposed to the global defaults
+            (`GenerationConfig()`). If unset, models saved starting from `v4.50` will consider this flag to be
+            `True`.
+        kwargs (`Dict[str, Any]`, *optional*):
+            Ad hoc parametrization of `generation_config` and/or additional model-specific kwargs that will be
+            forwarded to the `forward` function of the model. If the model is an encoder-decoder model, encoder
+            specific kwargs should not be prefixed and decoder specific kwargs should be prefixed with *decoder_*.
+
+    Return:
+        [`~utils.ModelOutput`] or `torch.LongTensor`: A [`~utils.ModelOutput`] (if `return_dict_in_generate=True`
+        or when `config.return_dict_in_generate=True`) or a `torch.LongTensor`.
+
+            If the model is *not* an encoder-decoder model (`model.config.is_encoder_decoder=False`), the possible
+            [`~utils.ModelOutput`] types are:
+
+                - [`~generation.GenerateDecoderOnlyOutput`],
+                - [`~generation.GenerateBeamDecoderOnlyOutput`]
+
+            If the model is an encoder-decoder model (`model.config.is_encoder_decoder=True`), the possible
+            [`~utils.ModelOutput`] types are:
+
+                - [`~generation.GenerateEncoderDecoderOutput`],
+                - [`~generation.GenerateBeamEncoderDecoderOutput`]
     """
     global past_embeddings
     past_embeddings = None
@@ -344,7 +413,9 @@ def generate(
     tokenizer = kwargs.pop("tokenizer", None)  # Pull this out first, we only use it for stopping criteria
     assistant_tokenizer = kwargs.pop("assistant_tokenizer", None)  # only used for assisted generation
 
-    generation_config, model_kwargs = self._prepare_generation_config(generation_config, **kwargs)
+    generation_config, model_kwargs = self._prepare_generation_config(
+        generation_config, use_model_defaults, **kwargs
+    )
     self._validate_model_kwargs(model_kwargs.copy())
     self._validate_assistant(assistant_model, tokenizer, assistant_tokenizer)
 
@@ -360,7 +431,6 @@ def generate(
     kwargs_has_attention_mask = model_kwargs.get("attention_mask", None) is not None
 
     # 3. Define model inputs
-    # Prepares inputs that will eventually be passed to the forward() function.
     inputs_tensor, model_input_name, model_kwargs = self._prepare_model_inputs(
         inputs, generation_config.bos_token_id, model_kwargs
     )
@@ -370,14 +440,14 @@ def generate(
     self._prepare_special_tokens(generation_config, kwargs_has_attention_mask, device=device)
 
     # decoder-only models must use left-padding for batched generation.
-    if not self.config.is_encoder_decoder and not is_torchdynamo_compiling():
+    if not self.config.is_encoder_decoder:
         # If `input_ids` was given, check if the last id in any sequence is `pad_token_id`
         # Note: If using, `inputs_embeds` this check does not work, because we want to be more hands-off.
         if (
-            generation_config._pad_token_tensor is not None
-            and batch_size > 1
-            and len(inputs_tensor.shape) == 2
-            and torch.sum(inputs_tensor[:, -1] == generation_config._pad_token_tensor) > 0
+                generation_config._pad_token_tensor is not None
+                and batch_size > 1
+                and len(inputs_tensor.shape) == 2
+                and torch.sum(inputs_tensor[:, -1] == generation_config._pad_token_tensor) > 0
         ):
             logger.warning(
                 "A decoder-only architecture is being used, but right-padding was detected! For correct "
@@ -401,7 +471,6 @@ def generate(
 
     if self.config.is_encoder_decoder and "encoder_outputs" not in model_kwargs:
         # if model is encoder decoder encoder_outputs are created and added to `model_kwargs`
-        # Encoder-decoder kwargs preparation; indirectly tied to forward() for encoder processing.
         model_kwargs = self._prepare_encoder_decoder_kwargs_for_generation(
             inputs_tensor, model_kwargs, model_input_name, generation_config
         )
@@ -468,7 +537,7 @@ def generate(
             "`streamer` cannot be used with beam search (yet!). Make sure that `num_beams` is set to 1."
         )
 
-    if not is_torchdynamo_compiling() and self.device.type != input_ids.device.type:
+    if self.device.type != input_ids.device.type:
         warnings.warn(
             "You are calling .generate() with the `input_ids` being on a device type different"
             f" than your model's device. `input_ids` is on {input_ids.device.type}, whereas the model"
@@ -587,7 +656,6 @@ def generate(
         )
 
         # 12. run sample (it degenerates to greedy search when `generation_config.do_sample=False`)
-        # Calls forward() internally during the sampling inference process.
         result = self._sample(
             input_ids,
             logits_processor=prepared_logits_processor,
@@ -597,33 +665,18 @@ def generate(
             streamer=streamer,
             **model_kwargs,
         )
-        pass
 
     elif generation_mode in (GenerationMode.BEAM_SAMPLE, GenerationMode.BEAM_SEARCH):
-        # 11. prepare beam search scorer
-        beam_scorer = BeamSearchScorer(
-            batch_size=batch_size,
-            num_beams=generation_config.num_beams,
-            device=inputs_tensor.device,
-            length_penalty=generation_config.length_penalty,
-            do_early_stopping=generation_config.early_stopping,
-            num_beam_hyps_to_keep=generation_config.num_return_sequences,
-            max_length=generation_config.max_length,
-        )
-
-        # 12. interleave input_ids with `num_beams` additional sequences per batch
+        # 11. interleave input_ids with `num_beams` additional sequences per batch
         input_ids, model_kwargs = self._expand_inputs_for_generation(
             input_ids=input_ids,
             expand_size=generation_config.num_beams,
             is_encoder_decoder=self.config.is_encoder_decoder,
             **model_kwargs,
         )
-
-        # 13. run beam sample
-        # Invokes forward() internally to score sequences during beam search.
+        # 12. run beam sample
         result = self._beam_search(
             input_ids,
-            beam_scorer,
             logits_processor=prepared_logits_processor,
             stopping_criteria=prepared_stopping_criteria,
             generation_config=generation_config,
@@ -651,7 +704,6 @@ def generate(
             **model_kwargs,
         )
         # 13. run beam search
-        # Uses forward() to evaluate sequences during grouped beam search.
         result = self._group_beam_search(
             input_ids,
             beam_scorer,
@@ -722,7 +774,6 @@ def generate(
             **model_kwargs,
         )
         # 13. run beam search
-        # Triggers forward() internally to enforce constraints during beam search.
         result = self._constrained_beam_search(
             input_ids,
             constrained_beam_scorer=constrained_beam_scorer,
@@ -736,7 +787,6 @@ def generate(
     # Convert to legacy cache format if requested
     if (
         generation_config.return_legacy_cache is True
-        and not is_torchdynamo_compiling()
         and hasattr(result, "past_key_values")
         and getattr(result.past_key_values, "to_legacy_cache") is not None
     ):
